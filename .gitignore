@@ -1,0 +1,12 @@
+# your ROM and anything made from it
+rom/
+re/
+*.nes
+*.state
+# builds, logs, and the nesrecomp experiment
+build-*/
+logs/
+nesrecomp/
+game.toml
+seeds.txt
+.DS_Store
