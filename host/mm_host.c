@@ -1,6 +1,6 @@
 /* Mega Man (NES) for handhelds: a small libretro host.
  *
- * Loads an NES core (fceumm) with dlopen, runs it one frame per display
+ * Loads an NES core (fceumm) with SDL_LoadObject, runs it one frame per display
  * refresh and hands every frame to the game layer (mm_game.c), which adds
  * the checkpoints, the death counter, L/R weapon switching and the HUD.
  *
@@ -30,18 +30,29 @@
  * <save dir>/bench.state, for --bench.
  *
  * Window keys on a computer: arrows, Z = B, X = A, Enter = Start,
- * Right Shift = Select, Q/W = L/R, Esc = MENU.
+ * A = Y (rapid fire), Right Shift = Select, Q/W = L/R, Esc = MENU.
  */
 #include "libretro.h"
 #include "mm_game.h"
 #include "mm_host.h"
 #include <SDL.h>
-#include <dlfcn.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#include <windows.h>
+#define make_dir(path) _mkdir(path)
+#define CORE_FILE "fceumm_libretro.dll"
+#elif defined(__APPLE__)
+#define make_dir(path) mkdir(path, 0755)
+#define CORE_FILE "fceumm_libretro.dylib"
+#else
+#define make_dir(path) mkdir(path, 0755)
+#define CORE_FILE "fceumm_libretro.so"
+#endif
 
 #ifndef DISPLAY_HZ
 #define DISPLAY_HZ 60.0
@@ -247,9 +258,9 @@ static int16_t input_state_cb(unsigned port, unsigned device, unsigned index, un
 }
 
 static bool load_core(const char* path) {
-    core.so = dlopen(path, RTLD_NOW | RTLD_LOCAL);
-    if (!core.so) { fprintf(stderr, "can't load core %s: %s\n", path, dlerror()); return false; }
-#define SYM(field, name) if (!(*(void**)&core.field = dlsym(core.so, name))) { fprintf(stderr, "core lacks %s\n", name); return false; }
+    core.so = SDL_LoadObject(path);
+    if (!core.so) { fprintf(stderr, "can't load core %s: %s\n", path, SDL_GetError()); return false; }
+#define SYM(field, name) if (!(*(void**)&core.field = SDL_LoadFunction(core.so, name))) { fprintf(stderr, "core lacks %s\n", name); return false; }
     SYM(init, "retro_init") SYM(deinit, "retro_deinit")
     SYM(set_environment, "retro_set_environment") SYM(set_video_refresh, "retro_set_video_refresh")
     SYM(set_audio_sample, "retro_set_audio_sample") SYM(set_audio_sample_batch, "retro_set_audio_sample_batch")
@@ -341,6 +352,15 @@ static void write_ppm(const char* path) {
     fclose(f);
 }
 
+/* rename() that also replaces an existing file on Windows. */
+bool host_replace_file(const char* tmp, const char* path) {
+#ifdef _WIN32
+    return MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+    return rename(tmp, path) == 0;
+#endif
+}
+
 /* The running machine into <save dir>/bench.state (for --bench). */
 bool host_save_bench_state(void) {
     size_t n = core.serialize_size();
@@ -351,7 +371,7 @@ bool host_save_bench_state(void) {
     FILE* f = buf && core.serialize(buf, n) ? fopen(tmp, "wb") : NULL;
     bool ok = f && fwrite(buf, 1, n, f) == n;
     if (f) ok = fclose(f) == 0 && ok;
-    ok = ok && rename(tmp, path) == 0;
+    ok = ok && host_replace_file(tmp, path);
     free(buf);
     fprintf(stderr, ok ? "[MM] bench state saved: %s\n" : "[MM] can't write %s\n", path);
     return ok;
@@ -372,9 +392,10 @@ int main(int argc, char** argv) {
     int watch[64], nwatch = 0;
     int poke_addr[16], poke_val[16], npoke = 0; long poke_at[16];
     const char* bench_state = NULL;
+    bool save_dir_set = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--core") && i + 1 < argc) core_path = argv[++i];
-        else if (!strcmp(argv[i], "--save-dir") && i + 1 < argc) snprintf(s_save_dir, sizeof(s_save_dir), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--save-dir") && i + 1 < argc) snprintf(s_save_dir, sizeof(s_save_dir), "%s", argv[++i]), save_dir_set = true;
         else if (!strcmp(argv[i], "--headless")) s_headless = true;
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atol(argv[++i]), s_headless = true;
         else if (!strcmp(argv[i], "--input") && i + 1 < argc) input_file = argv[++i];
@@ -397,9 +418,32 @@ int main(int argc, char** argv) {
         else if (argv[i][0] != '-') rom_path = argv[i];
         else { fprintf(stderr, "unknown option %s\n", argv[i]); return 2; }
     }
-    if (!rom_path) { fprintf(stderr, "usage: %s [--core PATH] [--save-dir DIR] ROM\n", argv[0]); return 2; }
-    if (!core_path) core_path = "fceumm_libretro.so";
-    mkdir(s_save_dir, 0755);
+    /* Defaults next to the program: the core, the ROM ("megaman.nes" or
+     * "Mega Man (USA).nes") and, unless --save-dir says otherwise, saves/. */
+    static char def_core[1024], def_rom[1024];
+    char* base = SDL_GetBasePath();
+    if (base) {
+        if (!core_path) snprintf(def_core, sizeof(def_core), "%s%s", base, CORE_FILE), core_path = def_core;
+        if (!rom_path) {
+            static const char* const names[] = { "megaman.nes", "Mega Man (USA).nes" };
+            for (int i = 0; i < 2 && !rom_path; i++) {
+                snprintf(def_rom, sizeof(def_rom), "%s%s", base, names[i]);
+                FILE* f = fopen(def_rom, "rb");
+                if (f) fclose(f), rom_path = def_rom;
+            }
+        }
+        if (!save_dir_set) snprintf(s_save_dir, sizeof(s_save_dir), "%ssaves", base);
+        SDL_free(base);
+    }
+    if (!rom_path) {
+        fprintf(stderr, "usage: %s [--core PATH] [--save-dir DIR] ROM\n", argv[0]);
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Mega Man",
+            "Mega Man (USA) ROM not found.\n\nPut it next to the program as megaman.nes, "
+            "or drop the .nes file on the program.", NULL);
+        return 2;
+    }
+    if (!core_path) core_path = CORE_FILE;
+    make_dir(s_save_dir);
     if (input_file && !load_input(input_file)) return 2;
     if (bench_state && frames < 0) frames = 1800;
     if (bench_state) s_headless = false;       /* --frames turned it on: the bench renders */
@@ -523,6 +567,7 @@ int main(int argc, char** argv) {
             if (k[SDL_SCANCODE_RIGHT]) held |= PAD_RIGHT;
             if (k[SDL_SCANCODE_Z]) held |= PAD_B;
             if (k[SDL_SCANCODE_X]) held |= PAD_A;
+            if (k[SDL_SCANCODE_A]) held |= PAD_Y;
             if (k[SDL_SCANCODE_RETURN]) held |= PAD_START;
             if (k[SDL_SCANCODE_RSHIFT]) held |= PAD_SELECT;
             if (k[SDL_SCANCODE_Q]) held |= PAD_L;

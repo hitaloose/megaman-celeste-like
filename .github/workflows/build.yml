@@ -1,0 +1,137 @@
+# Builds Mega Man for MiaUI (RG35XX), Windows, macOS and Linux.
+# Every push and pull request: the packages are the run's artifacts.
+# A tag v*: they also go to a GitHub release of that tag.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  miaui:
+    runs-on: ubuntu-latest
+    # Debian bookworm: glibc 2.36, MiaUI ships 2.37 (newer would not load)
+    container: debian:bookworm
+    steps:
+      - name: Toolchain
+        run: |
+          dpkg --add-architecture armhf
+          apt-get -qq update
+          apt-get -qq install -y --no-install-recommends build-essential git ca-certificates zip \
+            gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf binutils-arm-linux-gnueabihf libsdl2-dev:armhf
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Build
+        run: bash scripts/build_miaui.sh
+      - name: Package
+        run: |
+          mkdir -p dist/Ports
+          cp -r "build-miaui/Mega Man.pak" dist/Ports/
+          cd dist && zip -qr ../megaman-miaui.zip Ports
+      - uses: actions/upload-artifact@v4
+        with:
+          name: megaman-miaui
+          path: megaman-miaui.zip
+
+  linux:
+    # 22.04: glibc 2.35, so it runs on older distributions too
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - run: sudo apt-get -qq update && sudo apt-get -qq install -y libsdl2-dev
+      - name: Build
+        run: |
+          make -C libretro-fceumm -f Makefile.libretro platform=unix -j"$(nproc)"
+          mkdir -p dist/megaman
+          cc -O2 -Wall -Wextra -o dist/megaman/megaman host/*.c $(sdl2-config --cflags --libs) -ldl -lm
+          cp libretro-fceumm/fceumm_libretro.so desktop/README.txt dist/megaman/
+          strip dist/megaman/megaman dist/megaman/fceumm_libretro.so
+          tar -C dist -czf megaman-linux-x64.tar.gz megaman
+      - uses: actions/upload-artifact@v4
+        with:
+          name: megaman-linux-x64
+          path: megaman-linux-x64.tar.gz
+
+  macos:
+    runs-on: macos-14   # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - run: brew list sdl2 >/dev/null 2>&1 || brew install sdl2
+      - name: Build
+        run: |
+          make -C libretro-fceumm -f Makefile.libretro platform=osx -j"$(sysctl -n hw.ncpu)"
+          mkdir -p dist/megaman
+          cc -O2 -Wall -Wextra -o dist/megaman/megaman host/*.c $(sdl2-config --cflags --libs)
+          cp libretro-fceumm/fceumm_libretro.dylib desktop/README.txt dist/megaman/
+          # SDL2 goes in the folder: no Homebrew needed to play
+          SDL=$(otool -L dist/megaman/megaman | awk '/libSDL2/ {print $1}')
+          cp "$(brew --prefix sdl2)/lib/$(basename "$SDL")" dist/megaman/
+          chmod u+w dist/megaman/*.dylib
+          install_name_tool -id "@executable_path/$(basename "$SDL")" "dist/megaman/$(basename "$SDL")"
+          install_name_tool -change "$SDL" "@executable_path/$(basename "$SDL")" dist/megaman/megaman
+          # changed binaries need a new (ad hoc) signature to run on Apple Silicon
+          codesign --force -s - dist/megaman/*.dylib dist/megaman/megaman
+          otool -L dist/megaman/megaman
+          cd dist && zip -qry ../megaman-macos-arm64.zip megaman
+      - uses: actions/upload-artifact@v4
+        with:
+          name: megaman-macos-arm64
+          path: megaman-macos-arm64.zip
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: git make zip mingw-w64-x86_64-gcc mingw-w64-x86_64-SDL2
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Build
+        run: |
+          make -C libretro-fceumm -f Makefile.libretro platform=win -j"$(nproc)"
+          mkdir -p dist/megaman
+          gcc -O2 -Wall -Wextra -D__USE_MINGW_ANSI_STDIO=1 -o dist/megaman/megaman.exe host/*.c \
+            $(sdl2-config --cflags --libs) -static-libgcc
+          cp libretro-fceumm/fceumm_libretro.dll desktop/README.txt dist/megaman/
+          strip dist/megaman/megaman.exe dist/megaman/fceumm_libretro.dll
+          # the MinGW DLLs they need (SDL2 and the like) go in the folder
+          for f in dist/megaman/*.exe dist/megaman/*.dll; do ldd "$f"; done \
+            | awk '$3 ~ /^\/mingw64\// {print $3}' | sort -u | xargs -r cp -t dist/megaman/
+          ls -l dist/megaman
+          cd dist && zip -qr ../megaman-windows-x64.zip megaman
+      - uses: actions/upload-artifact@v4
+        with:
+          name: megaman-windows-x64
+          path: megaman-windows-x64.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [miaui, linux, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --title "Mega Man $GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --clobber \
+            megaman-miaui.zip megaman-windows-x64.zip megaman-macos-arm64.zip megaman-linux-x64.tar.gz

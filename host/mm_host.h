@@ -39,6 +39,8 @@ void     host_mute(bool on);
 void     host_set_option(const char* key, const char* value);
 /* Runs one frame and puts the machine back, so the picture shows new options. */
 void     host_refresh_picture(void);
+/* rename(tmp, path), replacing path if it exists (Windows too). */
+bool     host_replace_file(const char* tmp, const char* path);
 /* Writes the machine to <save dir>/bench.state (for --bench). */
 bool     host_save_bench_state(void);
 /* The latest 256x240 NES picture (ARGB). */

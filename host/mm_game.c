@@ -198,7 +198,7 @@ static void cfg_save(void) {
     if (!f) return;
     fprintf(f, "palette=%d\naspect=%d\nsmooth=%d\n", s_palette, s_aspect, s_smooth ? 1 : 0);
     fclose(f);
-    rename(tmp, path);
+    host_replace_file(tmp, path);
 }
 
 /* ---- helpers ------------------------------------------------------------------- */
@@ -330,7 +330,7 @@ static void file_info_save(int i) {
     fprintf(f, "deaths=%u\nbosses=%d\nwily=%d\nrefill=%d\nin_stage=%d\n",
             fi->deaths, fi->bosses, fi->wily, fi->refill ? 1 : 0, fi->in_stage ? 1 : 0);
     fclose(f);
-    rename(tmp, path);
+    host_replace_file(tmp, path);
 }
 
 static int bosses_beaten(const uint8_t* r) {
@@ -352,7 +352,7 @@ static void file_save_state(bool in_stage) {
     if (!f) return;
     bool ok = fwrite(buf, 1, s_cp_size, f) == s_cp_size;
     ok = fclose(f) == 0 && ok;
-    if (!ok || rename(tmp, path) != 0) { fprintf(stderr, "[MM] can't write %s\n", path); return; }
+    if (!ok || !host_replace_file(tmp, path)) { fprintf(stderr, "[MM] can't write %s\n", path); return; }
     const uint8_t* r = host_ram();
     FileInfo* fi = &s_files[s_file];
     fi->used = true;
@@ -471,7 +471,7 @@ static void hall_save(int m) {
     if (!f) return;
     for (int i = 0; i < s_hall_n[m]; i++)
         fprintf(f, "%lld %u %u\n", (long long)s_hall[m][i].time, s_hall[m][i].deaths, s_hall[m][i].score);
-    if (fclose(f) == 0) rename(tmp, path);
+    if (fclose(f) == 0) host_replace_file(tmp, path);
 }
 
 static uint32_t score(const uint8_t* r) {

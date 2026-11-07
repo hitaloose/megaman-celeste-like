@@ -34,8 +34,21 @@ Saves and the log go to `Saves/MegaMan/`.
 
 ## Run on a computer
 
-    cc -O2 -o mm host/*.c $(sdl2-config --cflags --libs)
-    ./mm --core path/to/fceumm_libretro.dylib "Mega Man (USA).nes"
+Ready builds for Windows, macOS (Apple Silicon) and Linux, and the MiaUI
+package, come from GitHub Actions (`.github/workflows/build.yml`): the
+artifacts of each run, and the release of each `v*` tag. Put your ROM next
+to the program as `megaman.nes` (details in `desktop/README.txt`).
+
+To build it yourself:
+
+    make -C libretro-fceumm -f Makefile.libretro
+    cc -O2 -o megaman host/*.c $(sdl2-config --cflags --libs)
+    ./megaman --core libretro-fceumm/fceumm_libretro.dylib "Mega Man (USA).nes"
+
+Without `--core` / ROM / `--save-dir` it looks next to the program for
+`fceumm_libretro.{so,dylib,dll}`, `megaman.nes` (or `Mega Man (USA).nes`) and
+`saves/`. Keys: arrows, Z = B, X = A, A = rapid fire, Enter = Start,
+Right Shift = Select, Q / W = L / R, Esc = MENU; or a gamepad.
 
 `--headless --frames N --input script.txt --shot prefix --shot-at F --watch ADDRS --poke ADDR=VAL@F`
 run it without a window, for tests.
