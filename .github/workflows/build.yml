@@ -77,6 +77,13 @@ jobs:
           chmod u+w dist/megaman/*.dylib
           install_name_tool -id "@executable_path/$(basename "$SDL")" "dist/megaman/$(basename "$SDL")"
           install_name_tool -change "$SDL" "@executable_path/$(basename "$SDL")" dist/megaman/megaman
+          # Homebrew's SDL2 is sdl2-compat, which loads libSDL3.dylib from its own folder
+          if strings "dist/megaman/$(basename "$SDL")" | grep -q '@loader_path/libSDL3.dylib'; then
+            brew list sdl3 >/dev/null 2>&1 || brew install sdl3
+            cp "$(brew --prefix sdl3)/lib/libSDL3.0.dylib" dist/megaman/libSDL3.dylib
+            chmod u+w dist/megaman/libSDL3.dylib
+            install_name_tool -id "@loader_path/libSDL3.dylib" dist/megaman/libSDL3.dylib
+          fi
           # changed binaries need a new (ad hoc) signature to run on Apple Silicon
           codesign --force -s - dist/megaman/*.dylib dist/megaman/megaman
           otool -L dist/megaman/megaman
