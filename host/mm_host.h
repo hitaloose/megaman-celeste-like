@@ -39,6 +39,8 @@ void     host_mute(bool on);
 void     host_set_option(const char* key, const char* value);
 /* Runs one frame and puts the machine back, so the picture shows new options. */
 void     host_refresh_picture(void);
+/* Writes the machine to <save dir>/bench.state (for --bench). */
+bool     host_save_bench_state(void);
 /* The latest 256x240 NES picture (ARGB). */
 const uint32_t* host_nes_frame(void);
 

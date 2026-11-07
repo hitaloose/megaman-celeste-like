@@ -25,10 +25,10 @@ if [ ! -f "$OUT/fceumm_libretro.so" ] || [ "$ROOT/libretro-fceumm/.git/HEAD" -nt
 fi
 
 echo '[2/2] host'
-$CC $ARCH -O2 -Wall -Wextra -DDISPLAY_HZ=60.46 -I"$ROOT/host" -I/usr/include/SDL2 -I/usr/include/arm-linux-gnueabihf/SDL2 \
+$CC $ARCH -O2 -Wall -Wextra -I"$ROOT/host" -I/usr/include/SDL2 -I/usr/include/arm-linux-gnueabihf/SDL2 \
     "$ROOT/host/mm_host.c" "$ROOT/host/mm_game.c" "$ROOT/host/mm_ui.c" -lSDL2 -ldl -lm -o "$PAK/megaman.elf"
 
 cp "$OUT/fceumm_libretro.so" "$PAK/"
-cp "$ROOT/miaui/launch.sh" "$PAK/"
+cp "$ROOT/miaui/launch.sh" "$ROOT/miaui/bench.sh" "$PAK/"
 chmod +x "$PAK/launch.sh" "$PAK/megaman.elf"
 ls -lh "$PAK"

@@ -4,9 +4,9 @@
  * (RAM reads/writes and whole-machine snapshots, no ROM changes):
  *
  *  - Checkpoints: a snapshot is taken when Mega Man lands at the start of a
- *    stage, at the end of every screen transition going up or sideways (the
- *    freeze + camera move between areas; not when falling down into the next
- *    area, he could be falling onto spikes), and in the corridor behind the
+ *    stage, at the end of every screen transition (the freeze + camera move
+ *    between areas; in Cut Man's stage not when going down into the next
+ *    area), and in the corridor behind the
  *    first of a boss's two doors. A transition's snapshot only becomes the checkpoint
  *    once he has stayed alive CP_PROBATION frames after it (or reached the
  *    next transition): a room entered falling onto spikes doesn't trap him.
@@ -23,12 +23,20 @@
  *    a snapshot of the stage select screen (written each time the game gets
  *    there) or, in Dr. Wily's castle, of the start of the current Wily stage,
  *    plus its own death count (written at each death, so quitting doesn't
- *    undo deaths). Files: <save dir>/file<N>.state and file<N>.cfg.
+ *    undo deaths) and its mode, picked at NEW GAME: weapon energy refilled
+ *    on respawn or not. Files: <save dir>/file<N>.state and file<N>.cfg.
+ *  - Hall of Fame (last item of SELECT FILE): finished runs, one list per
+ *    mode, ranked by fewest deaths then highest score ($72-$78). When the
+ *    ending starts ($31 = $0B, after Wily's defeat and the score tally) the
+ *    run goes in, its file is erased and the Hall is shown with the run
+ *    marked; then back to the title. <save dir>/hall_refill.txt and
+ *    hall_norefill.txt, "time deaths score" per line.
  *  - MENU opens the options screen: PALETTE (the NES colours, seen live),
  *    ASPECT (PIXEL PERFECT 512x480, NTSC 8:7 585x480, FULL 4:3 640x480),
  *    FILTER (SMOOTH = sharp-bilinear, CRISP = nearest),
- *    REFILL WEAPONS on respawn, RESUME, MAIN MENU (back to the title screen
+ *    RESUME, MAIN MENU (back to the title screen
  *    to pick another file), QUIT GAME.
+ *    SELECT there writes the paused moment to bench.state (CPU clock benchmarks).
  *
  * RAM (Mega Man USA; Data Crystal's RAM map, checked against the ROM and runs):
  *   $1C camera state ($40 scrolling to a new area, $02 freeze, $01 nametable work;
@@ -39,7 +47,10 @@
  *   $6A health ($1C full)  $6B-$71 weapon energy  $A6 lives
  *   $0480 / $0600 Mega Man X / Y (object 0)
  * Death: every kind (health, pit, spikes) ends in the routine at $C219, which
- * sets $0600 = $F8 and $3C = $C0; a health death first hits $6A = 0.
+ * sets $0600 = $F8 and $3C = $C0; a health death first hits $6A = 0. Not to
+ * be confused with Wily's defeat ($C05A): $0600 = $F8 too, and $3C counts
+ * down from $FF through $C0.
+ *   $72-$78 score, one decimal digit per byte, lowest first
  * Stage start: $0600 = $04 and $3C = $C0 (READY, beaming down).
  */
 #include "mm_game.h"
@@ -49,6 +60,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define R_CAMERA   0x1C
 #define R_STAGE    0x31
@@ -59,6 +71,7 @@
 #define R_HP       0x6A
 #define R_ENERGY   0x6B          /* 7 bytes */
 #define R_LIVES    0xA6
+#define R_SCORE    0x72          /* 7 decimal digits, lowest first */
 #define R_Y        0x600
 
 #define HP_FULL    0x1C
@@ -92,6 +105,7 @@ static uint8_t  s_last_y;
 static bool     s_scrolling;       /* a transition is under way */
 static int      s_settle;
 static uint8_t  s_prev_hp;
+static uint8_t  s_prev_counter;    /* $3C last frame: a death sets $C0 at once, the clear countdown passes through it */
 static uint8_t  s_prev_camera;
 static bool     s_cam_scrolled;    /* this $02 freeze had a $40 scroll: a transition, not a door */
 static int      s_door_halves;     /* $02 freezes without a scroll (door opens, door closes) */
@@ -119,7 +133,7 @@ static uint32_t s_frozen[256 * 240];
 
 static bool     s_menu_open;
 static int      s_menu_sel;
-static bool     s_refill;          /* option: refill weapon energy on respawn */
+static bool     s_refill = true;   /* the run's mode (chosen at New Game): refill weapon energy on respawn */
 static int      s_palette = 1;     /* option: index in k_palettes */
 enum { ASPECT_PIXEL, ASPECT_NTSC, ASPECT_FULL, ASPECTS };
 static int      s_aspect = ASPECT_PIXEL;   /* option */
@@ -142,15 +156,19 @@ static bool     s_cfg_dirty;
 
 /* files */
 #define FILES 3
+#define STAGE_CUTMAN 0             /* $31: 0 Cut, 1 Ice, 2 Bomb, 3 Fire, 4 Elec, 5 Guts */
 #define STAGE_WILY1 6              /* Wily stages are $06-$09 */
 #define STAGE_TITLE 0x0A
 #define STAGE_ENDING 0x0B
-typedef struct { bool used, cleared, in_stage; uint32_t deaths; int bosses, wily; } FileInfo;
+typedef struct { bool used, in_stage, refill; uint32_t deaths; int bosses, wily; } FileInfo;
 static FileInfo s_files[FILES];
 static int      s_file = -1;       /* the file being played */
 static bool     s_title = true;    /* no file picked yet */
 static bool     s_files_open, s_erase_confirm;
-static int      s_files_sel;
+static bool     s_new_game;        /* SELECT FILE: choosing the refill mode of a new game */
+static bool     s_new_refill;
+static int      s_files_sel;       /* 0..FILES-1 the files, FILES the Hall of Fame */
+#define FILE_ROWS (FILES + 1)
 static int      s_inject_start;    /* frames left holding START (new game) */
 static bool     s_select_saved;    /* this visit to the stage select is in the file */
 
@@ -165,7 +183,6 @@ static void cfg_load(void) {
     int v;
     while (fgets(line, sizeof(line), f))
     {
-        if (sscanf(line, "refill=%d", &v) == 1) s_refill = v != 0;
         if (sscanf(line, "palette=%d", &v) == 1 && v >= 0 && v < PALETTES) s_palette = v;
         if (sscanf(line, "aspect=%d", &v) == 1 && v >= 0 && v < ASPECTS) s_aspect = v;
         if (sscanf(line, "smooth=%d", &v) == 1) s_smooth = v != 0;
@@ -179,7 +196,7 @@ static void cfg_save(void) {
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     FILE* f = fopen(tmp, "w");
     if (!f) return;
-    fprintf(f, "refill=%d\npalette=%d\naspect=%d\nsmooth=%d\n", s_refill ? 1 : 0, s_palette, s_aspect, s_smooth ? 1 : 0);
+    fprintf(f, "palette=%d\naspect=%d\nsmooth=%d\n", s_palette, s_aspect, s_smooth ? 1 : 0);
     fclose(f);
     rename(tmp, path);
 }
@@ -284,6 +301,7 @@ static void file_path(char* buf, size_t n, int i, const char* ext) {
 static void file_info_load(int i) {
     FileInfo* fi = &s_files[i];
     memset(fi, 0, sizeof(*fi));
+    fi->refill = true;                         /* files from before the modes */
     char path[600], line[128];
     file_path(path, sizeof(path), i, "state");
     FILE* f = fopen(path, "rb");
@@ -296,7 +314,7 @@ static void file_info_load(int i) {
         if (sscanf(line, "deaths=%u", &u) == 1) fi->deaths = u;
         if (sscanf(line, "bosses=%d", &v) == 1) fi->bosses = v;
         if (sscanf(line, "wily=%d", &v) == 1) fi->wily = v;
-        if (sscanf(line, "cleared=%d", &v) == 1) fi->cleared = v != 0;
+        if (sscanf(line, "refill=%d", &v) == 1) fi->refill = v != 0;
         if (sscanf(line, "in_stage=%d", &v) == 1) fi->in_stage = v != 0;
     }
     fclose(f);
@@ -309,8 +327,8 @@ static void file_info_save(int i) {
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     FILE* f = fopen(tmp, "w");
     if (!f) return;
-    fprintf(f, "deaths=%u\nbosses=%d\nwily=%d\ncleared=%d\nin_stage=%d\n",
-            fi->deaths, fi->bosses, fi->wily, fi->cleared ? 1 : 0, fi->in_stage ? 1 : 0);
+    fprintf(f, "deaths=%u\nbosses=%d\nwily=%d\nrefill=%d\nin_stage=%d\n",
+            fi->deaths, fi->bosses, fi->wily, fi->refill ? 1 : 0, fi->in_stage ? 1 : 0);
     fclose(f);
     rename(tmp, path);
 }
@@ -369,6 +387,7 @@ static bool file_load(int i) {
     if (!ok) { fprintf(stderr, "[MM] can't load %s\n", path); return false; }
     reset_tracking();
     s_deaths = s_files[i].deaths;
+    s_refill = s_files[i].refill;
     s_select_saved = true;
     const uint8_t* r = host_ram();
     if (s_files[i].in_stage) {                 /* the start of a Wily stage: also the checkpoint */
@@ -391,10 +410,167 @@ static void file_erase(int i) {
     fprintf(stderr, "[MM] file %d erased\n", i + 1);
 }
 
+/* ---- Hall of Fame ------------------------------------------------------------------- */
+/* Completed runs, one list per refill mode, best first: fewest deaths, then
+ * highest score. <save dir>/hall_refill.txt and hall_norefill.txt, one
+ * "time deaths score" line per run. */
+#define HALL_MAX  100
+#define HALL_ROWS 10               /* rows on screen */
+typedef struct { int64_t time; uint32_t deaths, score; } HallEntry;
+static HallEntry s_hall[2][HALL_MAX];      /* [refill] */
+static int      s_hall_n[2];
+static bool     s_hall_open;
+static int      s_hall_mode;       /* tab shown: 1 refill, 0 no refill */
+static int      s_hall_scroll;
+static int      s_hall_mark = -1;  /* row of the run just completed, or -1 */
+static int      s_hall_mark_mode;  /* the list it is in */
+static bool     s_hall_from_clear; /* closing goes to the title, not back to SELECT FILE */
+
+static void go_main_menu(void);
+
+static void hall_path(char* buf, size_t n, int refill) {
+    snprintf(buf, n, "%s/hall_%s.txt", host_save_dir(), refill ? "refill" : "norefill");
+}
+
+static bool hall_better(const HallEntry* a, const HallEntry* b) {
+    return a->deaths != b->deaths ? a->deaths < b->deaths : a->score > b->score;
+}
+
+/* Puts e in its place in the list (kept sorted); returns its row, -1 if it didn't make the list. */
+static int hall_insert(int m, HallEntry e) {
+    int i = s_hall_n[m];
+    if (i == HALL_MAX) {
+        if (!hall_better(&e, &s_hall[m][HALL_MAX - 1])) return -1;
+        i--;
+    } else {
+        s_hall_n[m]++;
+    }
+    for (; i > 0 && hall_better(&e, &s_hall[m][i - 1]); i--) s_hall[m][i] = s_hall[m][i - 1];
+    s_hall[m][i] = e;
+    return i;
+}
+
+static void hall_load(int m) {
+    char path[600], line[128];
+    hall_path(path, sizeof(path), m);
+    s_hall_n[m] = 0;
+    FILE* f = fopen(path, "r");
+    if (!f) return;
+    long long t;
+    unsigned d, sc;
+    while (fgets(line, sizeof(line), f))
+        if (sscanf(line, "%lld %u %u", &t, &d, &sc) == 3) hall_insert(m, (HallEntry){ t, d, sc });
+    fclose(f);
+}
+
+static void hall_save(int m) {
+    char path[600], tmp[610];
+    hall_path(path, sizeof(path), m);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE* f = fopen(tmp, "w");
+    if (!f) return;
+    for (int i = 0; i < s_hall_n[m]; i++)
+        fprintf(f, "%lld %u %u\n", (long long)s_hall[m][i].time, s_hall[m][i].deaths, s_hall[m][i].score);
+    if (fclose(f) == 0) rename(tmp, path);
+}
+
+static uint32_t score(const uint8_t* r) {
+    uint32_t v = 0;
+    for (int i = 6; i >= 0; i--) v = v * 10 + (r[R_SCORE + i] % 10);
+    return v;
+}
+
+static void hall_open(int mode, int mark, bool from_clear) {
+    s_hall_open = true;
+    s_hall_mode = s_hall_mark_mode = mode;
+    s_hall_mark = mark;
+    s_hall_from_clear = from_clear;
+    s_hall_scroll = mark >= HALL_ROWS ? mark - HALL_ROWS / 2 : 0;
+    int max = s_hall_n[mode] - HALL_ROWS;
+    if (s_hall_scroll > max) s_hall_scroll = max > 0 ? max : 0;
+    freeze_picture(true);
+}
+
+static void hall_input(uint32_t p) {
+    if (p & (PAD_LEFT | PAD_RIGHT)) {
+        s_hall_mode ^= 1;
+        s_hall_scroll = 0;
+    }
+    int max = s_hall_n[s_hall_mode] - HALL_ROWS;
+    if ((p & PAD_UP) && s_hall_scroll > 0) s_hall_scroll--;
+    if ((p & PAD_DOWN) && s_hall_scroll < max) s_hall_scroll++;
+    if (s_hall_from_clear ? (p & (PAD_A | PAD_B | PAD_START)) : (p & PAD_B)) {
+        s_hall_open = false;
+        if (s_hall_from_clear) {
+            s_swallow = s_held & PAD_NES_MASK;
+            freeze_picture(false);
+            go_main_menu();
+        }                                      /* else back to SELECT FILE, still open below */
+    }
+}
+
+static void hall_draw(uint32_t* cv) {
+    const int x0 = NES_X + 4, x1 = NES_X + 252, y0 = 24, y1 = 216;
+    ui_box(cv, x0, y0, x1, y1);
+    const uint32_t white = 0xFFF8F8F8u, sel = 0xFFF8D030u, dim = 0xFFA0A0A0u;
+    ui_text(cv, NES_X + 128 - ui_text_w("HALL OF FAME", 1) / 2, y0 + 8, "HALL OF FAME", white, 1);
+    const char* tab = s_hall_mode ? "<  REFILL ON  >" : "<  REFILL OFF  >";
+    ui_text(cv, NES_X + 128 - ui_text_w(tab, 1) / 2, y0 + 20, tab, sel, 1);
+    /* columns: rank, date and time, deaths, score */
+    const int cr = x0 + 8, cd = x0 + 32, cx = x0 + 140, cs = x1 - 8 - ui_text_w("0000000", 1);
+    int y = y0 + 36;
+    ui_text(cv, cd, y, "DATE", dim, 1);
+    ui_skull(cv, cx, y, dim, 1);
+    ui_text(cv, cs, y, "SCORE", dim, 1);
+    y += 14;
+    const int m = s_hall_mode;
+    if (!s_hall_n[m]) ui_text(cv, NES_X + 128 - ui_text_w("NO RUNS YET", 1) / 2, y + 40, "NO RUNS YET", dim, 1);
+    for (int i = s_hall_scroll; i < s_hall_n[m] && i < s_hall_scroll + HALL_ROWS; i++, y += 12) {
+        const HallEntry* e = &s_hall[m][i];
+        bool marked = i == s_hall_mark && m == s_hall_mark_mode;
+        uint32_t c = marked ? sel : white;
+        char rank[12], date[24], deaths[12], sc[12];
+        snprintf(rank, sizeof(rank), "%d", i + 1);
+        time_t t = (time_t)e->time;
+        struct tm* tm = localtime(&t);
+        if (tm) strftime(date, sizeof(date), "%Y-%m-%d %H:%M", tm);
+        else snprintf(date, sizeof(date), "-");
+        snprintf(deaths, sizeof(deaths), "%u", e->deaths);
+        snprintf(sc, sizeof(sc), "%07u", e->score);
+        if (marked) ui_text(cv, cr - 6, y, ">", sel, 1);
+        ui_text(cv, cr + 12 - ui_text_w(rank, 1), y, rank, c, 1);
+        ui_text(cv, cd, y, date, c, 1);
+        ui_text(cv, cx, y, deaths, c, 1);
+        ui_text(cv, cs, y, sc, c, 1);
+    }
+    char foot[48];
+    snprintf(foot, sizeof(foot), "%s%s", s_hall_n[m] > HALL_ROWS ? "UP/DOWN SCROLL  " : "",
+             s_hall_from_clear ? "A CONTINUE" : "B BACK");
+    ui_text(cv, NES_X + 128 - ui_text_w(foot, 1) / 2, y1 - 14, foot, dim, 1);
+}
+
+/* The run is complete (Wily beaten, the ending about to start): into the Hall
+ * of Fame of its mode, the file erased, the Hall shown with the run marked. */
+static void run_completed(void) {
+    const FileInfo* fi = &s_files[s_file];
+    int m = fi->refill ? 1 : 0;
+    HallEntry e = { (int64_t)time(NULL), s_deaths, score(host_ram()) };
+    int row = hall_insert(m, e);
+    hall_save(m);
+    fprintf(stderr, "[MM] file %d completed: deaths %u score %u, hall %s row %d\n",
+            s_file + 1, e.deaths, e.score, m ? "refill" : "norefill", row + 1);
+    file_erase(s_file);
+    s_file = -1;
+    s_title = true;                            /* no file being played: nothing more is saved */
+    hall_open(m, row, true);
+}
+
+/* ---- SELECT FILE ---------------------------------------------------------------------- */
 static void files_close(void) {
     s_files_open = false;
     s_swallow = s_held & PAD_NES_MASK;   /* START held here would pick a stage */
     s_erase_confirm = false;
+    s_new_game = false;
     freeze_picture(false);
 }
 
@@ -404,18 +580,30 @@ static void files_input(uint32_t p) {
         else if (p & (PAD_B | PAD_SELECT)) s_erase_confirm = false;
         return;
     }
-    if (p & PAD_UP) s_files_sel = (s_files_sel + FILES - 1) % FILES;
-    if (p & PAD_DOWN) s_files_sel = (s_files_sel + 1) % FILES;
-    if ((p & PAD_SELECT) && s_files[s_files_sel].used) { s_erase_confirm = true; return; }
-    if (p & (PAD_A | PAD_START)) {
+    if (s_new_game) {                          /* the refill mode of the new game */
         int i = s_files_sel;
-        if (s_files[i].used) {
-            if (!file_load(i)) return;
-        } else {                               /* new game: let the title screen go on */
+        if (p & (PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN)) s_new_refill = !s_new_refill;
+        else if (p & (PAD_A | PAD_START)) {
             s_deaths = 0;
-            s_files[i].deaths = 0;
-            s_inject_start = 3;
-        }
+            s_refill = s_new_refill;
+            memset(&s_files[i], 0, sizeof(s_files[i]));
+            s_files[i].refill = s_new_refill;
+            s_inject_start = 3;                /* let the title screen go on */
+            s_file = i;
+            s_title = false;
+            files_close();
+        } else if (p & PAD_B) s_new_game = false;
+        return;
+    }
+    if (p & PAD_UP) s_files_sel = (s_files_sel + FILE_ROWS - 1) % FILE_ROWS;
+    if (p & PAD_DOWN) s_files_sel = (s_files_sel + 1) % FILE_ROWS;
+    bool hall = s_files_sel == FILES;
+    if ((p & PAD_SELECT) && !hall && s_files[s_files_sel].used) { s_erase_confirm = true; return; }
+    if (p & (PAD_A | PAD_START)) {
+        if (hall) { hall_open(1, -1, false); return; }
+        int i = s_files_sel;
+        if (!s_files[i].used) { s_new_game = true; s_new_refill = true; return; }
+        if (!file_load(i)) return;
         s_file = i;
         s_title = false;
         files_close();
@@ -425,31 +613,39 @@ static void files_input(uint32_t p) {
 }
 
 static void files_draw(uint32_t* cv) {
-    const int x0 = NES_X + 16, x1 = NES_X + 240, y0 = 40, y1 = 200;
+    const int x0 = NES_X + 16, x1 = NES_X + 240, y0 = 32, y1 = 208;
     ui_box(cv, x0, y0, x1, y1);
     const uint32_t white = 0xFFF8F8F8u, sel = 0xFFF8D030u, dim = 0xFFA0A0A0u;
     ui_text(cv, NES_X + 128 - ui_text_w("SELECT FILE", 1) / 2, y0 + 8, "SELECT FILE", white, 1);
     for (int i = 0; i < FILES; i++) {
         const FileInfo* fi = &s_files[i];
-        int y = y0 + 28 + i * 34;
+        int y = y0 + 26 + i * 32;
         bool here = i == s_files_sel;
         char name[16], detail[48];
         snprintf(name, sizeof(name), "FILE %d", i + 1);
-        if (!fi->used) snprintf(detail, sizeof(detail), "NEW GAME");
-        else if (fi->cleared) snprintf(detail, sizeof(detail), "CLEARED   DEATHS %u", fi->deaths);
-        else if (fi->wily) snprintf(detail, sizeof(detail), "WILY STAGE %d   DEATHS %u", fi->wily, fi->deaths);
-        else snprintf(detail, sizeof(detail), "BOSSES %d/6   DEATHS %u", fi->bosses, fi->deaths);
+        const char* mode = fi->refill ? "REFILL" : "NO REFILL";
+        if (here && s_new_game) snprintf(detail, sizeof(detail), "WEAPON REFILL  < %s >", s_new_refill ? "ON" : "OFF");
+        else if (!fi->used) snprintf(detail, sizeof(detail), "NEW GAME");
+        else if (fi->wily) snprintf(detail, sizeof(detail), "WILY %d  DEATHS %u  %s", fi->wily, fi->deaths, mode);
+        else snprintf(detail, sizeof(detail), "BOSSES %d/6  DEATHS %u  %s", fi->bosses, fi->deaths, mode);
         if (here) ui_text(cv, x0 + 8, y, ">", sel, 1);
         ui_text(cv, x0 + 18, y, name, here ? sel : white, 1);
-        ui_text(cv, x0 + 30, y + 11, detail, here ? white : dim, 1);
+        ui_text(cv, x0 + 30, y + 11, detail, here && s_new_game ? sel : here ? white : dim, 1);
     }
-    const char* foot = s_erase_confirm ? "ERASE THIS FILE?  A YES  B NO" : "A START  SELECT ERASE  B BACK";
-    ui_text(cv, NES_X + 128 - ui_text_w(foot, 1) / 2, y1 - 14, foot, s_erase_confirm ? sel : dim, 1);
+    bool hall = s_files_sel == FILES;
+    int y = y0 + 26 + FILES * 32 + 4;
+    if (hall) ui_text(cv, x0 + 8, y, ">", sel, 1);
+    ui_text(cv, x0 + 18, y, "HALL OF FAME", hall ? sel : white, 1);
+    const char* foot = s_erase_confirm ? "ERASE THIS FILE?  A YES  B NO"
+                     : s_new_game ? "LEFT/RIGHT CHANGE  A START  B BACK"
+                     : hall ? "A OPEN  B BACK" : "A START  SELECT ERASE  B BACK";
+    ui_text(cv, NES_X + 128 - ui_text_w(foot, 1) / 2, y1 - 14, foot, s_erase_confirm || s_new_game ? sel : dim, 1);
 }
 
 /* ---- options screen --------------------------------------------------------------- */
-enum { ITEM_PALETTE, ITEM_ASPECT, ITEM_FILTER, ITEM_REFILL, ITEM_RESUME, ITEM_MAIN, ITEM_QUIT, ITEM_COUNT };
+enum { ITEM_PALETTE, ITEM_ASPECT, ITEM_FILTER, ITEM_RESUME, ITEM_MAIN, ITEM_QUIT, ITEM_COUNT };
 static bool s_main_confirm;        /* MAIN MENU asked: waiting for A (yes) or B (no) */
+static int  s_bench_msg;           /* 1 = bench state saved, -1 = failed (footer until the menu closes) */
 
 /* Back to the title screen (console reset), where START opens SELECT FILE.
  * The file keeps what was last saved in it; deaths are already written. */
@@ -473,6 +669,7 @@ static void menu_close(void) {
     s_menu_open = false;
     s_swallow = s_held & PAD_NES_MASK;
     s_main_confirm = false;
+    s_bench_msg = 0;
     freeze_picture(false);
     if (s_cfg_dirty) { cfg_save(); s_cfg_dirty = false; }
 }
@@ -481,6 +678,10 @@ static void menu_input(uint32_t p) {
     if (s_main_confirm) {
         if (p & PAD_A) { menu_close(); go_main_menu(); }
         else if (p & (PAD_B | PAD_MENU)) s_main_confirm = false;
+        return;
+    }
+    if (p & PAD_SELECT) {                      /* the paused moment into bench.state (benchmarks) */
+        s_bench_msg = host_save_bench_state() ? 1 : -1;
         return;
     }
     if (p & PAD_UP) s_menu_sel = (s_menu_sel + ITEM_COUNT - 1) % ITEM_COUNT;
@@ -499,11 +700,6 @@ static void menu_input(uint32_t p) {
     }
     if ((p & (PAD_LEFT | PAD_RIGHT | PAD_A)) && s_menu_sel == ITEM_FILTER) {
         s_smooth = !s_smooth;
-        s_cfg_dirty = true;
-        return;
-    }
-    if ((p & (PAD_LEFT | PAD_RIGHT | PAD_A)) && s_menu_sel == ITEM_REFILL) {
-        s_refill = !s_refill;
         s_cfg_dirty = true;
         return;
     }
@@ -527,7 +723,7 @@ static void menu_draw(uint32_t* cv) {
     char deaths[32];
     snprintf(deaths, sizeof(deaths), "DEATHS: %u", s_deaths);
     ui_text(cv, NES_X + 128 - ui_text_w(deaths, 1) / 2, y0 + 22, deaths, dim, 1);
-    static const char* labels[ITEM_COUNT] = { "PALETTE", "ASPECT", "FILTER", "REFILL WEAPONS", "RESUME", "MAIN MENU", "QUIT GAME" };
+    static const char* labels[ITEM_COUNT] = { "PALETTE", "ASPECT", "FILTER", "RESUME", "MAIN MENU", "QUIT GAME" };
     for (int i = 0; i < ITEM_COUNT; i++) {
         int y = y0 + 42 + i * 14;
         uint32_t c = i == s_menu_sel ? sel : white;
@@ -535,8 +731,7 @@ static void menu_draw(uint32_t* cv) {
         ui_text(cv, x0 + 18, y, labels[i], c, 1);
         const char* v = i == ITEM_PALETTE ? k_palettes[s_palette].name
                       : i == ITEM_ASPECT ? k_aspect_names[s_aspect]
-                      : i == ITEM_FILTER ? (s_smooth ? "SMOOTH" : "CRISP")
-                      : i == ITEM_REFILL ? (s_refill ? "ON" : "OFF") : NULL;
+                      : i == ITEM_FILTER ? (s_smooth ? "SMOOTH" : "CRISP") : NULL;
         if (v) {                               /* "< VALUE >" in the right column */
             const int vx0 = x0 + 106, vx1 = x1 - 6;
             ui_text(cv, vx0, y, "<", i == s_menu_sel ? sel : dim, 1);
@@ -546,7 +741,7 @@ static void menu_draw(uint32_t* cv) {
     }
     const char* foot = NULL;
     if (s_main_confirm) foot = "STAGE PROGRESS IS LOST  A YES  B NO";
-    else if (s_menu_sel == ITEM_REFILL) foot = "WEAPON ENERGY ON RESPAWN";
+    else if (s_bench_msg) foot = s_bench_msg > 0 ? "BENCH STATE SAVED" : "CAN'T SAVE BENCH STATE";
     else if (s_menu_sel == ITEM_MAIN) foot = "BACK TO THE TITLE AND FILES";
     else if (s_menu_sel == ITEM_FILTER) foot = s_aspect == ASPECT_PIXEL ? "NO EFFECT WITH PIXEL PERFECT"
                                         : s_smooth ? "EVEN PIXELS AND SOFT EDGES" : "SHARP BUT UNEVEN PIXELS";
@@ -562,6 +757,15 @@ void game_init(void) {
     cfg_load();
     set_palette(s_palette);
     for (int i = 0; i < FILES; i++) file_info_load(i);
+    hall_load(0);
+    hall_load(1);
+}
+
+void game_state_loaded(void) {
+    reset_tracking();
+    s_title = false;
+    s_file = -1;
+    s_select_saved = true;
 }
 
 void game_tick(uint32_t held, uint32_t pressed) {
@@ -569,6 +773,7 @@ void game_tick(uint32_t held, uint32_t pressed) {
     s_pressed = pressed;
     s_swallow &= held;
     if (s_menu_open) { menu_input(pressed); return; }
+    if (s_hall_open) { hall_input(pressed); return; }
     if (s_files_open) { files_input(pressed); return; }
     if (s_title && (pressed & PAD_START) && host_ram()[R_STAGE] == STAGE_TITLE) {
         s_files_open = true;
@@ -593,7 +798,7 @@ void game_tick(uint32_t held, uint32_t pressed) {
 }
 
 int game_frames_this_tick(void) {
-    if (s_menu_open || s_files_open) return 0;
+    if (s_menu_open || s_files_open || s_hall_open) return 0;
     if (s_ws != WS_IDLE) return 8;
     return 1;
 }
@@ -668,7 +873,7 @@ void game_after_frame(void) {
     }
     s_last_y = r[R_Y];
 
-    if (s_ws != WS_IDLE) { weapon_switch_step(r); s_prev_hp = r[R_HP]; return; }
+    if (s_ws != WS_IDLE) { weapon_switch_step(r); s_prev_hp = r[R_HP]; s_prev_counter = r[R_COUNTER]; return; }
 
     /* the stage select screen (portrait blinking): into the file, once per visit */
     if (!s_title && !s_select_saved && r[R_CAMERA] == 0x8A && r[R_MODE] == 0x06) {
@@ -676,12 +881,7 @@ void game_after_frame(void) {
         file_save_state(false);
     }
     /* the ending */
-    if (s_file >= 0 && r[R_STAGE] == STAGE_ENDING && !s_files[s_file].cleared) {
-        s_files[s_file].cleared = true;
-        s_files[s_file].deaths = s_deaths;
-        file_info_save(s_file);
-        fprintf(stderr, "[MM] file %d cleared, deaths %u\n", s_file + 1, s_deaths);
-    }
+    if (s_file >= 0 && r[R_STAGE] == STAGE_ENDING) run_completed();
 
     /* lives never run out */
     if (!(r[R_LIVES] & 0x80) && r[R_LIVES] < 2) r[R_LIVES] = 2;
@@ -689,7 +889,9 @@ void game_after_frame(void) {
     /* deaths */
     if (s_in_stage && !s_dying) {
         bool hp_death = s_prev_hp > 0 && r[R_HP] == 0;
-        bool other_death = r[R_Y] == 0xF8 && r[R_COUNTER] == 0xC0;
+        /* $C219 sets $3C = $C0 at once; after Wily the clear sequence counts
+         * $3C down from $FF with $0600 = $F8, through $C0: not a death */
+        bool other_death = r[R_Y] == 0xF8 && r[R_COUNTER] == 0xC0 && s_prev_counter != 0xC1;
         if (hp_death || other_death) {
             s_dying = true;
             s_deaths++;
@@ -749,7 +951,8 @@ void game_after_frame(void) {
             bool ok = s_in_stage && !s_dying && r[R_HP] > 0;
             if (s_scrolling) {
                 /* Mega Man at the top of the new area: he fell or climbed down into it */
-                if (r[R_Y] < 0x80) fprintf(stderr, "[MM] transition down: no checkpoint f%u\n", host_frame());
+                if (r[R_Y] < 0x80 && s_stage == STAGE_CUTMAN)
+                    fprintf(stderr, "[MM] transition down (Cut Man): no checkpoint f%u\n", host_frame());
                 else if (ok) take_checkpoint("transition");
             } else if (ok && s_doors % 2 == 1) {
                 take_checkpoint("door");       /* the corridor before the boss's door */
@@ -761,6 +964,7 @@ void game_after_frame(void) {
     }
     s_prev_camera = cam;
     s_prev_hp = r[R_HP];
+    s_prev_counter = r[R_COUNTER];
 }
 
 const uint32_t* game_picture(void) { return s_hold_picture ? s_frozen : host_nes_frame(); }
@@ -791,7 +995,8 @@ void game_draw(uint32_t* cv) {
     ui_fill(cv, bx, py + 4, bx + bw, py + 15, 0x90000000u);
     ui_skull(cv, bx + 2, py + 6, white, 1);
     ui_text(cv, bx + 10, py + 6, n, white, 1);
-    if (s_files_open) files_draw(cv);
+    if (s_files_open && !s_hall_open) files_draw(cv);
+    if (s_hall_open) hall_draw(cv);
     if (s_menu_open) menu_draw(cv);
 }
 

@@ -4,6 +4,8 @@
 #include <stdint.h>
 
 void     game_init(void);
+/* The host loaded a whole-machine state (--bench): play it as is, no file. */
+void     game_state_loaded(void);
 /* Once per display frame: the player's pad (`pressed` = went down since the last tick). */
 void     game_tick(uint32_t held, uint32_t pressed);
 /* How many NES frames to run this display frame: 1 normally, 0 while the
