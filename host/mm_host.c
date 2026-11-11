@@ -35,6 +35,7 @@
 #include "libretro.h"
 #include "mm_game.h"
 #include "mm_host.h"
+#include "mm_overlay.h"
 #include <SDL.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -636,6 +637,25 @@ int main(int argc, char** argv) {
                 SDL_RenderCopy(ren, sharp, NULL, &dst);
             } else {
                 SDL_RenderCopy(ren, nes_tex, NULL, &dst);
+            }
+            if (game_overlay()) {                  /* CRT overlay on the picture (its frame on the picture's edges), under the menus */
+                static SDL_Texture* crt;
+                static int crt_i = -1, crt_w;
+                int i = game_overlay() - 1;
+                if (i != crt_i || dst.w != crt_w) {    /* rebuilt only when the overlay or ASPECT changes */
+                    if (crt) SDL_DestroyTexture(crt);
+                    crt = NULL;
+                    crt_i = i;
+                    crt_w = dst.w;
+                    int w = dst.w < OVERLAY_W ? dst.w : OVERLAY_W;
+                    const uint32_t* px = overlay_fit(i, w);
+                    if (px && (crt = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, OVERLAY_H))) {
+                        SDL_UpdateTexture(crt, NULL, px, w * 4);
+                        SDL_SetTextureBlendMode(crt, SDL_BLENDMODE_BLEND);
+                        SDL_SetTextureScaleMode(crt, SDL_ScaleModeNearest);
+                    }
+                }
+                if (crt) SDL_RenderCopy(ren, crt, NULL, &dst);   /* 1:1 while the picture is 480 tall (every ASPECT at 640x480) */
             }
             SDL_RenderCopy(ren, tex, NULL, NULL);
             double work = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency();

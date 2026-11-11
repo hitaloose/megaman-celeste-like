@@ -1,0 +1,8 @@
+CRT overlays (Perfect_CRT*.png), unchanged, from "perfect_overlays" by ourigen:
+https://github.com/ourigen/perfect_overlays/tree/main/CRT
+
+Credits listed there: 1playerinsertcoin (original overlays), mugwomp_93 and
+drkhrse (bezels, https://github.com/drkhrse/drkhrse_miyoo_bezels).
+
+The repository declares no license; the overlays are included here with credit
+to their authors. They are embedded into the program by scripts/gen_overlays.sh.

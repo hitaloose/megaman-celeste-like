@@ -16,7 +16,12 @@ snapshots, no ROM patch), in `host/mm_game.c`:
   with date, deaths and score, ranked by fewest deaths (score breaks ties);
   beating Wily goes there with the run marked, and frees its file
 - MENU: palette, aspect (pixel perfect / NTSC 8:7 / full 4:3), filter
-  (smooth / crisp), main menu, quit
+  (smooth / crisp), overlay (CRT scanlines, with or without the screen frame,
+  from ourigen's [perfect_overlays](https://github.com/ourigen/perfect_overlays);
+  credits in `assets/overlays/CREDITS.txt`), main menu, quit
+
+The overlays are embedded in the program: after changing a PNG in
+`assets/overlays/`, run `sh scripts/gen_overlays.sh`.
 
 The details (RAM addresses, how each part works) are in the comment at the
 top of `host/mm_game.c`.

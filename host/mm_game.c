@@ -55,6 +55,7 @@
  */
 #include "mm_game.h"
 #include "mm_host.h"
+#include "mm_overlay.h"
 #include "mm_ui.h"
 #include <stdbool.h>
 #include <stdio.h>
@@ -138,6 +139,7 @@ static int      s_palette = 1;     /* option: index in k_palettes */
 enum { ASPECT_PIXEL, ASPECT_NTSC, ASPECT_FULL, ASPECTS };
 static int      s_aspect = ASPECT_PIXEL;   /* option */
 static bool     s_smooth = true;   /* option: FILTER SMOOTH (sharp-bilinear) / CRISP (nearest) */
+static int      s_overlay;         /* option: 0 OFF, else CRT overlay s_overlay - 1 */
 static const char* k_aspect_names[ASPECTS] = { "PIXEL PERFECT", "NTSC 8:7", "FULL 4:3" };
 
 /* NES palettes of the fceumm core (the NES makes a video signal, not RGB:
@@ -186,6 +188,7 @@ static void cfg_load(void) {
         if (sscanf(line, "palette=%d", &v) == 1 && v >= 0 && v < PALETTES) s_palette = v;
         if (sscanf(line, "aspect=%d", &v) == 1 && v >= 0 && v < ASPECTS) s_aspect = v;
         if (sscanf(line, "smooth=%d", &v) == 1) s_smooth = v != 0;
+        if (sscanf(line, "overlay=%d", &v) == 1 && v >= 0 && v <= overlay_count()) s_overlay = v;
     }
     fclose(f);
 }
@@ -196,7 +199,7 @@ static void cfg_save(void) {
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     FILE* f = fopen(tmp, "w");
     if (!f) return;
-    fprintf(f, "palette=%d\naspect=%d\nsmooth=%d\n", s_palette, s_aspect, s_smooth ? 1 : 0);
+    fprintf(f, "palette=%d\naspect=%d\nsmooth=%d\noverlay=%d\n", s_palette, s_aspect, s_smooth ? 1 : 0, s_overlay);
     fclose(f);
     host_replace_file(tmp, path);
 }
@@ -643,7 +646,7 @@ static void files_draw(uint32_t* cv) {
 }
 
 /* ---- options screen --------------------------------------------------------------- */
-enum { ITEM_PALETTE, ITEM_ASPECT, ITEM_FILTER, ITEM_RESUME, ITEM_MAIN, ITEM_QUIT, ITEM_COUNT };
+enum { ITEM_PALETTE, ITEM_ASPECT, ITEM_FILTER, ITEM_OVERLAY, ITEM_RESUME, ITEM_MAIN, ITEM_QUIT, ITEM_COUNT };
 static bool s_main_confirm;        /* MAIN MENU asked: waiting for A (yes) or B (no) */
 static int  s_bench_msg;           /* 1 = bench state saved, -1 = failed (footer until the menu closes) */
 
@@ -703,6 +706,12 @@ static void menu_input(uint32_t p) {
         s_cfg_dirty = true;
         return;
     }
+    if ((p & (PAD_LEFT | PAD_RIGHT | PAD_A)) && s_menu_sel == ITEM_OVERLAY) {
+        int n = overlay_count() + 1;
+        s_overlay = (s_overlay + ((p & PAD_LEFT) ? n - 1 : 1)) % n;
+        s_cfg_dirty = true;
+        return;
+    }
     if (p & PAD_A) {
         if (s_menu_sel == ITEM_RESUME) menu_close();
         else if (s_menu_sel == ITEM_MAIN) {
@@ -723,7 +732,7 @@ static void menu_draw(uint32_t* cv) {
     char deaths[32];
     snprintf(deaths, sizeof(deaths), "DEATHS: %u", s_deaths);
     ui_text(cv, NES_X + 128 - ui_text_w(deaths, 1) / 2, y0 + 22, deaths, dim, 1);
-    static const char* labels[ITEM_COUNT] = { "PALETTE", "ASPECT", "FILTER", "RESUME", "MAIN MENU", "QUIT GAME" };
+    static const char* labels[ITEM_COUNT] = { "PALETTE", "ASPECT", "FILTER", "OVERLAY", "RESUME", "MAIN MENU", "QUIT GAME" };
     for (int i = 0; i < ITEM_COUNT; i++) {
         int y = y0 + 42 + i * 14;
         uint32_t c = i == s_menu_sel ? sel : white;
@@ -731,7 +740,8 @@ static void menu_draw(uint32_t* cv) {
         ui_text(cv, x0 + 18, y, labels[i], c, 1);
         const char* v = i == ITEM_PALETTE ? k_palettes[s_palette].name
                       : i == ITEM_ASPECT ? k_aspect_names[s_aspect]
-                      : i == ITEM_FILTER ? (s_smooth ? "SMOOTH" : "CRISP") : NULL;
+                      : i == ITEM_FILTER ? (s_smooth ? "SMOOTH" : "CRISP")
+                      : i == ITEM_OVERLAY ? (s_overlay ? overlay_name(s_overlay - 1) : "OFF") : NULL;
         if (v) {                               /* "< VALUE >" in the right column */
             const int vx0 = x0 + 106, vx1 = x1 - 6;
             ui_text(cv, vx0, y, "<", i == s_menu_sel ? sel : dim, 1);
@@ -745,6 +755,7 @@ static void menu_draw(uint32_t* cv) {
     else if (s_menu_sel == ITEM_MAIN) foot = "BACK TO THE TITLE AND FILES";
     else if (s_menu_sel == ITEM_FILTER) foot = s_aspect == ASPECT_PIXEL ? "NO EFFECT WITH PIXEL PERFECT"
                                         : s_smooth ? "EVEN PIXELS AND SOFT EDGES" : "SHARP BUT UNEVEN PIXELS";
+    else if (s_menu_sel == ITEM_OVERLAY && s_overlay) foot = "CRT OVERLAY BY OURIGEN";
     if (foot) ui_text(cv, NES_X + 128 - ui_text_w(foot, 1) / 2, y1 - 14, foot, s_main_confirm ? sel : dim, 1);
 }
 
@@ -970,6 +981,8 @@ void game_after_frame(void) {
 const uint32_t* game_picture(void) { return s_hold_picture ? s_frozen : host_nes_frame(); }
 
 int game_smooth(void) { return s_smooth; }
+
+int game_overlay(void) { return s_overlay; }
 
 void game_present_rect(int sw, int sh, int* x, int* y, int* w, int* h) {
     int ph = sh, pw;

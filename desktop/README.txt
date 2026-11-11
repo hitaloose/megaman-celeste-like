@@ -16,3 +16,7 @@ Windows: SmartScreen may warn about an unknown program: More info > Run anyway.
 macOS: the app is not signed by Apple. The first time, right-click megaman >
 Open, or run in Terminal:  xattr -dr com.apple.quarantine <this folder>
 Linux: needs SDL2 (Debian/Ubuntu: sudo apt install libsdl2-2.0-0).
+
+CRT overlays (menu > OVERLAY): "perfect_overlays" by ourigen,
+https://github.com/ourigen/perfect_overlays (credits: 1playerinsertcoin,
+mugwomp_93, drkhrse).

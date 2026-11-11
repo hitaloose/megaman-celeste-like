@@ -23,6 +23,8 @@ const uint32_t* game_picture(void);
 void     game_present_rect(int sw, int sh, int* x, int* y, int* w, int* h);
 /* FILTER option: true = SMOOTH (sharp-bilinear), false = CRISP (nearest). */
 int      game_smooth(void);
+/* OVERLAY option: 0 = off, else 1 + the overlay index (mm_overlay.h). */
+int      game_overlay(void);
 void     game_shutdown(void);
 
 #endif
